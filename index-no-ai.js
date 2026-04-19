@@ -1,11 +1,19 @@
 import "dotenv/config";
 import { chromium } from "playwright";
 import fs from "fs";
+import ExcelJS from "exceljs";
 
 const AUTH_FILE = "./auth.json";
 const LOGIN_CHECK_URL = "https://live-backstage.tiktok.com/portal/anchor/list";
 const TARGET_URL = "https://live-backstage.tiktok.com/portal/anchor/scout-creators?tab=2&type=2";
+const ANALYZED_EXCEL_FILE = "./noai-analyzed-profiles.xlsx";
 const NO_AI_BUILD_TAG = "index-no-ai.js build 2026-04-18.1";
+const BACKSTAGE_BASE_URL = "https://live-backstage.tiktok.com/portal/anchor/instant-messages";
+const WHATSAPP_BASE_URL = "https://web.whatsapp.com/send";
+const WHATSAPP_WA_ME_BASE_URL = "https://wa.me";
+const TIKTOK_PROFILE_BASE_URL = "https://www.tiktok.com";
+const WHATSAPP_PREFILL_TEXT_ENCODED =
+  "Hola%21%20Recibimos%20tu%20solicitud%20para%20unirte%20a%20nuestra%20agencia%20de%20TikTok.%20Te%20contacto%20de%20Nu%20Agency%20%E2%9C%A6%20Te%20explico%20por%20ac%C3%A1%20un%20poco%20m%C3%A1s.%0A%0AEn%20TikTok%20LIVE%2C%20puedes%20monetizar%20a%20trav%C3%A9s%20de%20los%20regalos%20virtuales%20que%20los%20espectadores%20te%20env%C3%ADan%20como%20muestra%20de%20apoyo%20por%20tu%20contenido%2C%20carisma%20o%20talento.%0A%0ACada%20regalo%20que%20recibes%20se%20convierte%20autom%C3%A1ticamente%20en%20diamantes%2C%20que%20representan%20tus%20ganancias%20dentro%20de%20la%20plataforma.%0A%0APuedes%20retirar%20tu%20dinero%20cuando%20lo%20necesites%3A%20a%20diario%2C%20semanal%20o%20mensualmente%2C%20seg%C3%BAn%20tu%20preferencia.%20Nuestro%20equipo%20te%20ayudar%C3%A1%20a%20configurar%20tu%20cuenta%20para%20que%20el%20retiro%20sea%20r%C3%A1pido%20y%20sencillo.%0A%0AAdem%C3%A1s%2C%20en%20nuestra%20comunidad%2C%20puedes%20acceder%20a%20bonificaciones%20extra%20si%20tu%20rendimiento%20es%20destacado.%20%C2%A1Es%20una%20excelente%20forma%20de%20generar%20ingresos%20mientras%20disfrutas%20creando%20contenido%21%0A%0AMe%20cuentas%20si%20te%20interesa%2C%20estoy%20atenta%20%E2%9C%A6%0ANO%20TIENE%20NING%C3%9AN%20VALOR";
 
 function normalizeText(text) {
   return String(text || "")
@@ -21,6 +29,44 @@ function normalizeProfileCacheKey(value) {
     .toLowerCase()
     .replace(/^@/, "")
     .replace(/\s+/g, "");
+}
+
+function normalizeIdForLink(value) {
+  return String(value || "")
+    .replace(/@/g, "")
+    .trim();
+}
+
+function normalizePhoneForLink(value) {
+  return String(value || "")
+    .replace(/[^\d]/g, "")
+    .trim();
+}
+
+function buildBackstageUrl(displayId, autoRequest = false) {
+  const cleanedId = normalizeIdForLink(displayId);
+  if (!cleanedId) return "";
+  const params = new URLSearchParams({ displayID: cleanedId });
+  if (autoRequest) params.set("autoRequest", "1");
+  return `${BACKSTAGE_BASE_URL}?${params.toString()}`;
+}
+
+function buildWhatsAppUrl(rawPhone) {
+  const cleanedPhone = normalizePhoneForLink(rawPhone);
+  if (!cleanedPhone) return "";
+  return `${WHATSAPP_BASE_URL}?phone=${cleanedPhone}&text=${WHATSAPP_PREFILL_TEXT_ENCODED}`;
+}
+
+function buildWaMeUrl(rawPhone) {
+  const cleanedPhone = normalizePhoneForLink(rawPhone);
+  if (!cleanedPhone) return "";
+  return `${WHATSAPP_WA_ME_BASE_URL}/${cleanedPhone}`;
+}
+
+function buildTikTokProfileUrl(displayId) {
+  const cleanedId = normalizeIdForLink(displayId);
+  if (!cleanedId) return "";
+  return `${TIKTOK_PROFILE_BASE_URL}/@${encodeURIComponent(cleanedId)}?enter_from=backstage_anchor_scout`;
 }
 
 function escapeRegExp(value) {
@@ -47,6 +93,89 @@ function getUsernameInputFromArgs() {
 
   const positional = args.filter((a) => !a.startsWith("-"));
   return positional.join(" ").trim();
+}
+
+async function saveAnalyzedProfilesToExcel(rows, targetUsername) {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("analizados");
+
+  sheet.columns = [
+    { header: "username", key: "username", width: 28 },
+    { header: "tiktokProfileLink", key: "tiktokProfileLink", width: 62 },
+    { header: "phone", key: "phone", width: 24 },
+    { header: "phones", key: "phones", width: 32 },
+    { header: "backstageChatLink", key: "backstageChatLink", width: 56 },
+    { header: "backstageRequestLink", key: "backstageRequestLink", width: 62 },
+    { header: "whatsappLink", key: "whatsappLink", width: 44 },
+    { header: "waMeLink", key: "waMeLink", width: 34 },
+    { header: "error", key: "error", width: 46 },
+  ];
+
+  const headerRow = sheet.getRow(1);
+  headerRow.font = { bold: true };
+  headerRow.alignment = { vertical: "middle", horizontal: "left" };
+
+  const normalizedTarget = normalizeProfileId(targetUsername);
+  const sortedRows = [...(rows || [])].sort((a, b) => {
+    const pa = Number.isFinite(a?.pageIndex) ? a.pageIndex : 0;
+    const pb = Number.isFinite(b?.pageIndex) ? b.pageIndex : 0;
+    if (pa !== pb) return pa - pb;
+    const ra = Number.isFinite(a?.rowIndex) ? a.rowIndex : 0;
+    const rb = Number.isFinite(b?.rowIndex) ? b.rowIndex : 0;
+    return ra - rb;
+  });
+
+  for (const item of sortedRows) {
+    const phoneValue = String(item?.phone || "").trim();
+    const phonesArr = Array.isArray(item?.phones) ? item.phones.filter(Boolean) : [];
+    const phonesValue = phonesArr.join(", ");
+    const primaryPhone = phoneValue || (phonesArr[0] ? String(phonesArr[0]).trim() : "");
+    const username = item?.name || "";
+    const normalizedUsername = normalizeProfileId(username || "");
+    const idForBackstage = normalizeIdForLink(username);
+    const tiktokProfileLink = buildTikTokProfileUrl(username);
+    const backstageChatLink = buildBackstageUrl(idForBackstage, false);
+    const backstageRequestLink = buildBackstageUrl(idForBackstage, true);
+    const whatsappLink = buildWhatsAppUrl(primaryPhone);
+    const waMeLink = buildWaMeUrl(primaryPhone);
+    const startsWith93 =
+      phoneValue.startsWith("+93") ||
+      phonesArr.some((p) => String(p || "").trim().startsWith("+93"));
+
+    const row = sheet.addRow({
+      username,
+      tiktokProfileLink,
+      phone: primaryPhone,
+      phones: phonesValue,
+      backstageChatLink,
+      backstageRequestLink,
+      whatsappLink,
+      waMeLink,
+      error: item?.error || "",
+    });
+
+    if (normalizedUsername === normalizedTarget) {
+      row.getCell("username").font = { bold: true };
+    }
+
+    if (tiktokProfileLink) row.getCell("tiktokProfileLink").value = { text: tiktokProfileLink, hyperlink: tiktokProfileLink };
+    if (backstageChatLink) row.getCell("backstageChatLink").value = { text: backstageChatLink, hyperlink: backstageChatLink };
+    if (backstageRequestLink) row.getCell("backstageRequestLink").value = { text: backstageRequestLink, hyperlink: backstageRequestLink };
+    if (whatsappLink) row.getCell("whatsappLink").value = { text: whatsappLink, hyperlink: whatsappLink };
+    if (waMeLink) row.getCell("waMeLink").value = { text: waMeLink, hyperlink: waMeLink };
+
+    if (startsWith93) {
+      const phoneCell = row.getCell("phone");
+      phoneCell.fill = {
+        type: "pattern",
+        pattern: "solid",
+        fgColor: { argb: "FFFFEB3B" }
+      };
+    }
+  }
+
+  await workbook.xlsx.writeFile(ANALYZED_EXCEL_FILE);
+  return ANALYZED_EXCEL_FILE;
 }
 
 async function clickFirstVisible(page, selectors, clickOptions = {}) {
@@ -1489,6 +1618,7 @@ async function main() {
   let pageIndex = 1;
   let printedHeaders = false;
   const processedProfileKeys = new Set();
+  const analyzedRows = [];
   let found = null;
 
   while (pageIndex <= maxPages) {
@@ -1556,6 +1686,10 @@ async function main() {
       for (const result of phoneResults) {
         const key = normalizeProfileId(result?.name || "") || `page-${pageIndex}-row-${result?.rowIndex ?? "na"}`;
         processedProfileKeys.add(key);
+        analyzedRows.push({
+          ...result,
+          pageIndex
+        });
       }
       await waitForCreatorsTable(page).catch(() => null);
     }
@@ -1593,6 +1727,13 @@ async function main() {
     if (pageIndex > maxPages) {
       console.warn(`Se alcanzó el límite de seguridad de ${maxPages} páginas.`);
     }
+  }
+
+  try {
+    const excelPath = await saveAnalyzedProfilesToExcel(analyzedRows, targetUsername);
+    console.log(`[NO-AI] Perfiles analizados exportados a Excel: ${excelPath}`);
+  } catch (excelError) {
+    console.warn(`[NO-AI] No se pudo guardar el Excel: ${excelError?.message || excelError}`);
   }
 
   await browser.close();
