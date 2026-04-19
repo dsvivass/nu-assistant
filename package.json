@@ -1,0 +1,23 @@
+{
+  "name": "playwright",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "start:fecha": "node index.js --fecha",
+    "start:noai": "node index-no-ai.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@browserbasehq/stagehand": "^3.1.0",
+    "dotenv": "^17.3.1",
+    "openai": "^6.27.0",
+    "playwright": "^1.58.2",
+    "zod": "^4.3.6"
+  },
+  "type": "module"
+}
