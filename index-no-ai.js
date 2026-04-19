@@ -3,27 +3,9 @@ import { chromium } from "playwright";
 import fs from "fs";
 
 const AUTH_FILE = "./auth.json";
-const ANALYZED_PROFILES_FILE = "./noai-analyzed-profiles.json";
 const LOGIN_CHECK_URL = "https://live-backstage.tiktok.com/portal/anchor/list";
 const TARGET_URL = "https://live-backstage.tiktok.com/portal/anchor/scout-creators?tab=2&type=2";
-const INCORPORATION_WINDOW_MINUTES = 7 * 24 * 60;
 const NO_AI_BUILD_TAG = "index-no-ai.js build 2026-04-18.1";
-
-const MONTHS_ES = {
-  enero: 0,
-  febrero: 1,
-  marzo: 2,
-  abril: 3,
-  mayo: 4,
-  junio: 5,
-  julio: 6,
-  agosto: 7,
-  septiembre: 8,
-  setiembre: 8,
-  octubre: 9,
-  noviembre: 10,
-  diciembre: 11,
-};
 
 function normalizeText(text) {
   return String(text || "")
@@ -45,116 +27,14 @@ function escapeRegExp(value) {
   return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function loadAnalyzedProfilesCache() {
-  try {
-    if (!fs.existsSync(ANALYZED_PROFILES_FILE)) {
-      return new Set();
-    }
-
-    const raw = fs.readFileSync(ANALYZED_PROFILES_FILE, "utf-8");
-    const parsed = JSON.parse(raw);
-    const arr = Array.isArray(parsed)
-      ? parsed
-      : Array.isArray(parsed?.profiles)
-        ? parsed.profiles
-        : [];
-
-    return new Set(
-      arr
-        .map((v) => normalizeProfileCacheKey(v))
-        .filter(Boolean)
-    );
-  } catch (err) {
-    console.warn(`[NO-AI] No se pudo leer ${ANALYZED_PROFILES_FILE}: ${err.message}`);
-    return new Set();
-  }
-}
-
-function saveAnalyzedProfilesCache(cacheSet) {
-  try {
-    const profiles = Array.from(cacheSet)
-      .map((v) => normalizeProfileCacheKey(v))
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b));
-
-    fs.writeFileSync(
-      ANALYZED_PROFILES_FILE,
-      JSON.stringify(
-        {
-          updatedAt: new Date().toISOString(),
-          count: profiles.length,
-          profiles
-        },
-        null,
-        2
-      )
-    );
-  } catch (err) {
-    console.warn(`[NO-AI] No se pudo guardar ${ANALYZED_PROFILES_FILE}: ${err.message}`);
-  }
-}
-
-function safeLocalDate(year, monthIndex, day) {
-  const d = new Date(year, monthIndex, day, 0, 0, 0, 0);
-  if (
-    d.getFullYear() !== year ||
-    d.getMonth() !== monthIndex ||
-    d.getDate() !== day
-  ) {
-    return null;
-  }
-  return d;
-}
-
-function parseInputDate(rawInput) {
-  const input = String(rawInput || "").trim();
-  if (!input) return null;
-
-  let match = input.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
-  if (match) {
-    const year = Number(match[1]);
-    const month = Number(match[2]) - 1;
-    const day = Number(match[3]);
-    return safeLocalDate(year, month, day);
-  }
-
-  match = input.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{2,4})$/);
-  if (match) {
-    const day = Number(match[1]);
-    const month = Number(match[2]) - 1;
-    let year = Number(match[3]);
-    if (year < 100) year += 2000;
-    return safeLocalDate(year, month, day);
-  }
-
-  match = normalizeText(input).match(/^(\d{1,2})\s+de\s+([a-z]+)(?:\s+de\s+(\d{4}))?$/);
-  if (match) {
-    const day = Number(match[1]);
-    const month = MONTHS_ES[match[2]];
-    const year = match[3] ? Number(match[3]) : new Date().getFullYear();
-    if (month === undefined) return null;
-    return safeLocalDate(year, month, day);
-  }
-
-  match = normalizeText(input).match(/^(\d{1,2})\s+([a-z]+)(?:\s+(\d{4}))?$/);
-  if (match) {
-    const day = Number(match[1]);
-    const month = MONTHS_ES[match[2]];
-    const year = match[3] ? Number(match[3]) : new Date().getFullYear();
-    if (month === undefined) return null;
-    return safeLocalDate(year, month, day);
-  }
-
-  return null;
-}
-
-function getDateInputFromArgs() {
+function getUsernameInputFromArgs() {
   const args = process.argv.slice(2);
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (arg.startsWith("--fecha=")) return arg.slice("--fecha=".length).trim();
-    if (arg === "--fecha" || arg === "-f") {
+    if (arg.startsWith("--username=")) return arg.slice("--username=".length).trim();
+    if (arg.startsWith("--user=")) return arg.slice("--user=".length).trim();
+    if (arg === "--username" || arg === "--user" || arg === "-u") {
       const rest = [];
       for (let j = i + 1; j < args.length; j += 1) {
         if (args[j].startsWith("-") && rest.length > 0) break;
@@ -167,61 +47,6 @@ function getDateInputFromArgs() {
 
   const positional = args.filter((a) => !a.startsWith("-"));
   return positional.join(" ").trim();
-}
-
-function formatMinutesAsDhM(totalMinutes) {
-  const safe = Math.max(0, Math.floor(totalMinutes));
-  const days = Math.floor(safe / 1440);
-  const hours = Math.floor((safe % 1440) / 60);
-  const minutes = safe % 60;
-  return `${days}d ${hours}h ${minutes}m`;
-}
-
-function formatLocalDateTime(date) {
-  return date.toLocaleString("es-CO", { hour12: false });
-}
-
-function parseIncorporationToMinutes(text) {
-  if (!text) return NaN;
-  const raw = normalizeText(text);
-  if (!raw) return NaN;
-
-  let totalMinutes = 0;
-  const unitRegex = /(\d+(?:[\.,]\d+)?)\s*(d|dia|dias|day|days|h|hr|hrs|hora|horas|m|min|mins|minuto|minutos|s|sec|secs|seg|segs|segundo|segundos)\b/g;
-  const matches = Array.from(raw.matchAll(unitRegex));
-
-  for (const item of matches) {
-    const value = Number(item[1].replace(",", "."));
-    const unit = item[2];
-    if (!Number.isFinite(value)) continue;
-
-    if (["d", "dia", "dias", "day", "days"].includes(unit)) totalMinutes += value * 24 * 60;
-    else if (["h", "hr", "hrs", "hora", "horas"].includes(unit)) totalMinutes += value * 60;
-    else if (["m", "min", "mins", "minuto", "minutos"].includes(unit)) totalMinutes += value;
-    else if (["s", "sec", "secs", "seg", "segs", "segundo", "segundos"].includes(unit)) totalMinutes += value / 60;
-  }
-
-  if (totalMinutes > 0) return totalMinutes;
-
-  const hhmmss = raw.match(/^(\d+):(\d{2})(?::(\d{2}))?$/);
-  if (hhmmss) {
-    const h = Number(hhmmss[1]);
-    const m = Number(hhmmss[2]);
-    const s = Number(hhmmss[3] || 0);
-    return h * 60 + m + s / 60;
-  }
-
-  return NaN;
-}
-
-function getApplicationDateFromRemaining(referenceNow, remainingMinutes) {
-  if (!Number.isFinite(remainingMinutes)) return null;
-  const clampedRemaining = Math.min(
-    INCORPORATION_WINDOW_MINUTES,
-    Math.max(0, remainingMinutes)
-  );
-  const elapsedMinutes = INCORPORATION_WINDOW_MINUTES - clampedRemaining;
-  return new Date(referenceNow.getTime() - elapsedMinutes * 60000);
 }
 
 async function clickFirstVisible(page, selectors, clickOptions = {}) {
@@ -962,7 +787,7 @@ async function closeOpenedProfile(opened, page) {
 
 async function checkProfilesForPhone(page, profiles) {
   if (!profiles?.length) return [];
-  console.log(`Validando teléfono en ${profiles.length} perfiles que cumplen fecha (NO-AI)...`);
+  console.log(`Validando teléfono en ${profiles.length} perfiles (NO-AI)...`);
   const results = [];
   const openedProfileIds = new Set();
   let previousPanelSignature = "";
@@ -1564,27 +1389,15 @@ async function goToNextPage(page, expectedNextPage = null) {
 
 async function main() {
   console.log(`[NO-AI] Ejecutando ${NO_AI_BUILD_TAG}`);
-  const dateInput = getDateInputFromArgs();
-  const cutoffDate = parseInputDate(dateInput);
+  const usernameInput = getUsernameInputFromArgs();
+  const targetUsername = normalizeProfileId(usernameInput);
 
-  if (!cutoffDate) {
-    console.error("Fecha inválida o faltante.");
-    console.error("Usa: --fecha \"2026-04-16\", --fecha \"16/04/2026\" o --fecha \"16 de abril\".");
+  if (!targetUsername) {
+    console.error("Username inválido o faltante.");
+    console.error("Usa: --username \"sherwin37fachon\" (o -u \"sherwin37fachon\").");
     process.exit(1);
   }
-
-  const now = new Date();
-  if (cutoffDate.getTime() > now.getTime()) {
-    console.error(`La fecha ingresada (${cutoffDate.toLocaleDateString("es-CO")}) está en el futuro.`);
-    process.exit(1);
-  }
-
-  const referenceNow = new Date();
-  const referenceNowText = formatLocalDateTime(referenceNow);
-  const cutoffDateText = cutoffDate.toLocaleDateString("es-CO");
-  console.log(`Hora local de referencia: ${referenceNowText}.`);
-  console.log(`Fecha de corte: ${cutoffDateText}.`);
-  console.log("Regla: cumple si (ahora_local - (7d - scouting_status)) > fecha_de_corte.");
+  console.log(`[NO-AI] Buscando username objetivo: ${targetUsername}`);
 
   const browser = await chromium.launch({ headless: false });
   const context = await browser.newContext();
@@ -1672,17 +1485,11 @@ async function main() {
   await setItemsPerPageTo100(page);
   await waitForCreatorsTable(page);
 
-  const collected = [];
-  const seen = new Set();
-  const phoneByProfileKey = new Map();
-  const analyzedProfilesCache = loadAnalyzedProfilesCache();
-  console.log(
-    `[NO-AI] Cache de perfiles analizados: ${analyzedProfilesCache.size} (${ANALYZED_PROFILES_FILE})`
-  );
   const maxPages = 50;
   let pageIndex = 1;
   let printedHeaders = false;
-  let warnedMissingHeader = false;
+  const processedProfileKeys = new Set();
+  let found = null;
 
   while (pageIndex <= maxPages) {
     const extractedRows = await extractCurrentPageRows(page);
@@ -1692,12 +1499,7 @@ async function main() {
       printedHeaders = true;
     }
 
-    if (extractedRows.statusIndex === -1 && !warnedMissingHeader) {
-      console.warn("No encontré header 'Scouting status'; uso detección por contenido de filas.");
-      warnedMissingHeader = true;
-    }
-
-    const normalizedRows = (extractedRows.data || [])
+    const rows = (extractedRows.data || [])
       .map((p) => ({
         rowIndex: p.rowIndex,
         name: p.name || p.creator || p.creatorName || "",
@@ -1709,121 +1511,66 @@ async function main() {
           p.incorporacion ||
           p.incorporation ||
           p.estadoIncorporacion ||
-          "",
+          ""
       }))
-      .filter((p) => p.name || p.scoutingStatus)
-      .map((p) => {
-        const remainingMinutes = parseIncorporationToMinutes(p.scoutingStatus);
-        const appliedAt = getApplicationDateFromRemaining(referenceNow, remainingMinutes);
-        const qualifies = Boolean(appliedAt) && appliedAt.getTime() > cutoffDate.getTime();
-        return {
-          ...p,
-          remainingMinutes,
-          appliedAtMs: appliedAt ? appliedAt.getTime() : NaN,
-          appliedAtText: appliedAt ? formatLocalDateTime(appliedAt) : "",
-          qualifies,
-        };
-      });
+      .filter((p) => p.name || p.scoutingStatus);
 
-    if (!normalizedRows.length) {
+    if (!rows.length) {
       console.log(`Página ${pageIndex}: no se encontraron filas. Fin del recorrido.`);
       break;
     }
 
-    console.log(`Detalle por item en página ${pageIndex}:`);
-    for (const p of normalizedRows) {
-      const inferredText = p.appliedAtText || "N/A";
-      const compareText = p.appliedAtText
-        ? `${inferredText} > ${cutoffDateText} = ${p.qualifies}`
-        : `N/A > ${cutoffDateText} = false`;
+    console.log(`Página ${pageIndex}: ${rows.length} filas cargadas para explorar.`);
+
+    const exact = rows.find((r) => normalizeProfileId(r.name) === targetUsername);
+    let matchedRow = exact || null;
+    let matchType = exact ? "exact" : "";
+
+    if (!matchedRow && targetUsername.length >= 5) {
+      const partial = rows.find((r) => {
+        const rowKey = normalizeProfileId(r.name);
+        return rowKey && (rowKey.includes(targetUsername) || targetUsername.includes(rowKey));
+      });
+      if (partial) {
+        matchedRow = partial;
+        matchType = "partial";
+      }
+    }
+
+    const rowsToInspect = matchedRow
+      ? rows
+          .filter((r) => Number.isFinite(r.rowIndex))
+          .filter((r) => r.rowIndex <= matchedRow.rowIndex)
+      : rows.filter((r) => Number.isFinite(r.rowIndex));
+
+    const toInspect = rowsToInspect.filter((r) => {
+      const key = normalizeProfileId(r.name) || `page-${pageIndex}-row-${r.rowIndex}`;
+      return !processedProfileKeys.has(key);
+    });
+
+    if (toInspect.length) {
       console.log(
-        `- ${p.name || "(sin nombre)"} | scouting status: ${p.scoutingStatus || "(sin dato)"} | hoy: ${referenceNowText} | fecha_aplicación_inferida: ${inferredText} | comparación: ${compareText}`
+        `[NO-AI][PLAN][page=${pageIndex}] por_explorar=${toInspect.length}${matchedRow ? ` | stop_row=${matchedRow.rowIndex}` : ""}`
       );
-    }
-
-    const pageMatches = normalizedRows.filter((p) => p.qualifies);
-
-    const profileKey = (p) => normalizeProfileId(p?.name || "");
-    const toInspect = pageMatches.filter(
-      (p) =>
-        Number.isFinite(p.rowIndex) &&
-        !phoneByProfileKey.has(profileKey(p)) &&
-        !analyzedProfilesCache.has(profileKey(p))
-    );
-    console.log(
-      `[NO-AI][PLAN][page=${pageIndex}] qualifies=${pageMatches.length} | pending_open=${toInspect.length} | cached=${pageMatches.length - toInspect.length}`
-    );
-    if (toInspect.length) {
-      console.log(`[NO-AI][PLAN][page=${pageIndex}] Lista antes de abrir:`);
-      for (let i = 0; i < toInspect.length; i += 1) {
-        const p = toInspect[i];
-        console.log(
-          `[NO-AI][PLAN][page=${pageIndex}][${i + 1}/${toInspect.length}] row=${p.rowIndex} | name=${p.name || "(sin nombre)"} | scouting=${p.scoutingStatus || "(sin dato)"} | aplicada=${p.appliedAtText || "N/A"}`
-        );
-      }
-    }
-
-    if (toInspect.length) {
       const phoneResults = await checkProfilesForPhone(page, toInspect);
-      let cacheUpdated = false;
       for (const result of phoneResults) {
-        const key = normalizeProfileId(result?.name || "");
-        if (!key) continue;
-        phoneByProfileKey.set(key, {
-          hasPhone: Boolean(result.hasPhone),
-          phone: result.phone || "",
-          phones: result.phones || []
-        });
-
-        const analyzedKey = normalizeProfileId(result?.analyzedKey || key);
-        if (result?.analysisCompleted && analyzedKey && !analyzedProfilesCache.has(analyzedKey)) {
-          analyzedProfilesCache.add(analyzedKey);
-          cacheUpdated = true;
-        }
-      }
-      if (cacheUpdated) {
-        saveAnalyzedProfilesCache(analyzedProfilesCache);
-        console.log(
-          `[NO-AI] Cache actualizada: ${analyzedProfilesCache.size} perfiles analizados.`
-        );
+        const key = normalizeProfileId(result?.name || "") || `page-${pageIndex}-row-${result?.rowIndex ?? "na"}`;
+        processedProfileKeys.add(key);
       }
       await waitForCreatorsTable(page).catch(() => null);
     }
 
-    for (const p of pageMatches) {
-      const key = `${p.name}||${p.scoutingStatus}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const pKey = profileKey(p);
-      if (analyzedProfilesCache.has(pKey) && !phoneByProfileKey.has(pKey)) {
-        continue;
-      }
-      const phoneInfo = phoneByProfileKey.get(pKey) || {
-        hasPhone: false,
-        phone: "",
-        phones: []
+    if (matchedRow) {
+      const foundKey = normalizeProfileId(matchedRow.name);
+      found = {
+        ...matchedRow,
+        pageIndex,
+        matchType,
+        processed: processedProfileKeys.has(foundKey)
       };
-      collected.push({
-        ...p,
-        hasPhone: phoneInfo.hasPhone,
-        phone: phoneInfo.phone,
-        phones: phoneInfo.phones
-      });
-    }
-
-    const comparableRows = normalizedRows.filter((p) => Number.isFinite(p.remainingMinutes));
-    const lastRow = comparableRows[comparableRows.length - 1] || normalizedRows[normalizedRows.length - 1];
-    const lastMinutes = lastRow?.remainingMinutes;
-    const lastQualifies = Boolean(lastRow?.qualifies);
-
-    const minutesLabel = Number.isFinite(lastMinutes) ? ` (${formatMinutesAsDhM(lastMinutes)})` : "";
-    const appliedAtLabel = lastRow?.appliedAtText ? ` -> aplicada: ${lastRow.appliedAtText}` : "";
-    console.log(
-      `Página ${pageIndex}: ${normalizedRows.length} filas, ${pageMatches.length} cumplen. Último: ${lastRow.scoutingStatus}${minutesLabel}${appliedAtLabel}.`
-    );
-
-    if (!lastQualifies) {
-      console.log("El último item ya no cumple la fecha de corte. Se detiene la paginación.");
+      console.log(
+        `[NO-AI] Usuario objetivo alcanzado en detalle. page=${pageIndex} row=${matchedRow.rowIndex} name=${matchedRow.name || "(sin nombre)"} match=${matchType || "unknown"}`
+      );
       break;
     }
 
@@ -1837,21 +1584,14 @@ async function main() {
     await waitForCreatorsTable(page);
   }
 
-  if (pageIndex > maxPages) {
-    console.warn(`Se alcanzó el límite de seguridad de ${maxPages} páginas.`);
-  }
-
-  const filtered = collected.sort((a, b) => b.appliedAtMs - a.appliedAtMs);
-
-  console.log(`Creadores (Scouting status) con fecha de aplicación inferida mayor a ${cutoffDateText}:`);
-  if (!filtered.length) {
-    console.log("No se encontraron resultados.");
+  if (found) {
+    console.log(
+      `[NO-AI] Script detenido al llegar al perfil objetivo ${targetUsername} en página ${found.pageIndex}, fila ${found.rowIndex}.`
+    );
   } else {
-    for (const p of filtered) {
-      const phoneText = p.hasPhone ? (p.phone || (p.phones || []).join(", ")) : "sin teléfono";
-      console.log(
-        `- ${p.name} | scouting status: ${p.scoutingStatus} | hoy: ${referenceNowText} | fecha_aplicación_inferida: ${p.appliedAtText} | comparación: ${p.appliedAtText} > ${cutoffDateText} = ${p.qualifies} | dejó_tel=${p.hasPhone} | teléfono=${phoneText}`
-      );
+    console.log(`[NO-AI] No se encontró el username objetivo: ${targetUsername}.`);
+    if (pageIndex > maxPages) {
+      console.warn(`Se alcanzó el límite de seguridad de ${maxPages} páginas.`);
     }
   }
 
